@@ -1,6 +1,11 @@
 #include "ofxFft.h"
 #include "ofxFftBasic.h"
 
+// Now that we've included ofxFftBasic.h, we can safely define the default implementation
+#if !defined(OFX_FFT_USE_ACCELERATE) && !defined(OFX_FFT_USE_NEON)
+    typedef ofxFftBasic ofxFftPlatformOptimized;
+#endif
+
 #ifdef OFX_FFT_USE_FFTW
     #include "ofxFftw.h"
 #endif

@@ -9,13 +9,22 @@
 
 #include "ofxFft.h"
 #include "ofTypes.h"
+
+// Include KISS FFT headers with proper error handling
+#ifndef KISS_FFT_H
 extern "C" {
 #include "kiss_fftr.h"
 }
+#endif
 
-// Use more specific include path
+// Use more specific include path if needed
+#ifdef USE_SPECIFIC_KISS_PATH
 #include "kiss/kiss_fftr.h"
+#endif
+
 #include <vector>
+#include <mutex>
+#include <cstring>
 
 /**
  * @brief Basic FFT implementation using KISS FFT
@@ -81,5 +90,4 @@ private:
     // Thread-local buffers for KISS FFT operations
     std::vector<kiss_fft_cpx> localScratchBuf;
     std::mutex fftMutex; ///< For operations that can't be made thread-safe
-
 };

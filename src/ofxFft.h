@@ -22,16 +22,10 @@
     #endif
 #endif
 
-#if defined(OFX_FFT_USE_ACCELERATE)
-    #include "ofxFftAccelerate.h"
-    typedef ofxFftAccelerate ofxFftPlatformOptimized;
-#elif defined(OFX_FFT_USE_NEON)
-    #include "ofxFftNeon.h"
-    typedef ofxFftNeon ofxFftPlatformOptimized;
-#else
-    // Default to basic implementation
-    typedef ofxFftBasic ofxFftPlatformOptimized;
-#endif
+// Forward declarations
+class ofxFftBasic;
+class ofxFftAccelerate;
+class ofxFftNeon;
 
 /**
  * @brief Window types for FFT analysis
@@ -403,3 +397,16 @@ protected:
         return atan2f(y, x);
     }
 };
+
+// This section needs to be at the end of the file
+// after all the forward declarations
+#if defined(OFX_FFT_USE_ACCELERATE)
+    #include "ofxFftAccelerate.h"
+    typedef ofxFftAccelerate ofxFftPlatformOptimized;
+#elif defined(OFX_FFT_USE_NEON)
+    #include "ofxFftNeon.h"
+    typedef ofxFftNeon ofxFftPlatformOptimized;
+#else
+    // Default implementation will be defined after including ofxFftBasic.h
+    // in ofxFft.cpp
+#endif
