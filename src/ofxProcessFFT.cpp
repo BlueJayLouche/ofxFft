@@ -1,479 +1,519 @@
 #include "ofxProcessFFT.h"
+#include <numeric>
+#include <cmath>
 
-void ProcessFFT::setup(){
-    
-    scaleFactor = 10000;
-    numBins = 16384;
-    
-    fft.setup(numBins); //default
+ofxProcessFFT::ofxProcessFFT() :
+    normalize(false),
+    volumeRange(400),
+    scaleFactor(10000),
+    numBins(16384),
+    noisiness(0.0f),
+    spectralCentroid(0.0f),
+    delta(0.0f),
+    loudestBand(0),
+    maxSound(0.0f),
+    avgMaxSoundOverTime(0.0f),
+    superLowEqAvg(0.0f),
+    lowEqAvg(0.0f),
+    midEqAvg(0.0f),
+    highEqAvg(0.0f),
+    saveHistory(false),
+    graphMaxSize(200),
+    numFFTbins(32),
+    FFTpercentage(0.14f),
+    exponent(1.0f)
+{
+}
+
+void ofxProcessFFT::setup() {
+    // Initialize FFT analyzer
+    fft.setup(numBins);
     fft.setUseNormalization(false);
     
-    graphMaxSize = 200; //approx 10sec of history at 60fps
-    
-    graphLow.assign(graphMaxSize, 0.0);
-    graphMid.assign(graphMaxSize, 0.0);
-    graphHigh.assign(graphMaxSize, 0.0);
-    graphSuperLow.assign(graphMaxSize, 0.0);
-    graphMaxSound.assign(graphMaxSize, 200.0);
-    
-    saveHistory = false;
-    
-    exponent = 1.0;
-    
-    numFFTbins = 32;
-    FFTpercentage = 0.14;
-    
-    delta = loudestBand = noisiness = maxSound = avgMaxSoundOverTime = 0;
-    
-    normalize = false;
-    volumeRange = 400; //only used if normalize is false
-
+    // Allocate history buffers (approx 10sec at 60fps)
+    graphLow.assign(graphMaxSize, 0.0f);
+    graphMid.assign(graphMaxSize, 0.0f);
+    graphHigh.assign(graphMaxSize, 0.0f);
+    graphSuperLow.assign(graphMaxSize, 0.0f);
+    graphMaxSound.assign(graphMaxSize, 200.0f);
 }
 
-//---------------------------------------------
-void ProcessFFT::update(){
+void ofxProcessFFT::update() {
+    // Update FFT analysis
     fft.update();
-    if(saveHistory){
-        if (graphHigh.size()>graphMaxSize) {
-            graphHigh.erase(graphHigh.begin(), graphHigh.begin()+1);
-            graphMid.erase(graphMid.begin(), graphMid.begin()+1);
-            graphLow.erase(graphLow.begin(), graphLow.begin()+1);
-            graphSuperLow.erase(graphSuperLow.begin(),graphSuperLow.begin()+1);
+    
+    // Manage history buffers
+    if (saveHistory) {
+        if (graphHigh.size() > graphMaxSize) {
+            graphHigh.erase(graphHigh.begin());
+            graphMid.erase(graphMid.begin());
+            graphLow.erase(graphLow.begin());
+            graphSuperLow.erase(graphSuperLow.begin());
         }
     }
     
-    if(graphMaxSound.size()>graphMaxSize){ //make sure this is always running!
-        graphMaxSound.erase(graphMaxSound.begin(), graphMaxSound.begin()+1);
+    // Always manage maxSound history
+    if (graphMaxSound.size() > graphMaxSize) {
+        graphMaxSound.erase(graphMaxSound.begin());
     }
     
+    // Process FFT data
     calculateFFT(fft.getBins(), FFTpercentage, numFFTbins);
-
 }
 
-//---------------------------------------------
-void ProcessFFT::calculateFFT(vector<float>&buffer, float _FFTpercentage, int _numFFTbins){
+void ofxProcessFFT::calculateFFT(const std::vector<float>& buffer, float fftPercentage, int numFFTbins) {
+    // Store parameters
+    this->numFFTbins = numFFTbins;
+    this->FFTpercentage = fftPercentage;
     
-    this->numFFTbins = _numFFTbins;
-    this->FFTpercentage = _FFTpercentage;
+    // Reset data
+    fftSpectrum.clear();
+    fftSpectrum.resize(numFFTbins, 0.0f);
     
-    fftSpectrum.clear(); //empty it all
+    maxSound = 0.0f;
+    loudestBand = 0;
     
-    float loudBand = 0;
-    maxSound = 0;
-    float freqDelta = 0;
+    superLowEqAvg = lowEqAvg = midEqAvg = highEqAvg = 0.0f;
     
-    for(int i = 0; i<numFFTbins; i++){
-        fftSpectrum.push_back(0); //init the vector for each pass
-    }
+    // Calculate the bin size for FFT processing
+    const float bin_size = buffer.size() * fftPercentage;
     
-    //sort through and find the loudest sound
-    //use the loudest sound to normalize it to the proper range of 0-1
-    //drop all those values into the fftSpectrum
-    
-    //average first
-    for(int i=0; i<fftSpectrum.size(); i++){ //for the number of columns
-        float bin_size = buffer.size()*FFTpercentage;
+    // Process FFT data into spectrum bands
+    for (int i = 0; i < numFFTbins; i++) {
+        // Calculate range of raw bins to include in this spectrum band
+        const int startBin = bin_size * ((float)i / numFFTbins);
+        const int endBin = bin_size * ((float)(i + 1) / numFFTbins);
         
-        for (int j=(bin_size*((float)i/numFFTbins)); j<bin_size*((float)1/numFFTbins)+(bin_size*((float)i/numFFTbins)) ; j++) { //for each i position, average the values in i's+offset
-            fftSpectrum[i] = fftSpectrum[i] + buffer[j]*10000; //sum values in each section of buffers. Multiply by 10000 so you're not dealing with tiny numbers.
+        // Sum values in this band
+        for (int j = startBin; j < endBin; j++) {
+            if (j < buffer.size()) {
+                fftSpectrum[i] += buffer[j] * scaleFactor;
+            }
         }
         
-        fftSpectrum[i] = abs((fftSpectrum[i]/(bin_size*(float)1/numFFTbins))*(1+pow(i, exponent)/numFFTbins));//Then make low frequency values weighted lower than high frequency with pow
+        // Average and apply frequency weighting
+        const int numBinsInBand = endBin - startBin;
+        if (numBinsInBand > 0) {
+            fftSpectrum[i] = std::abs(fftSpectrum[i] / numBinsInBand *
+                             (1.0f + std::pow(i, exponent) / numFFTbins));
+        }
         
-        //find maximum band
-        if (maxSound<fftSpectrum[i]) {
+        // Find maximum band
+        if (fftSpectrum[i] > maxSound) {
             maxSound = fftSpectrum[i];
             loudestBand = i;
         }
     }
     
-    graphMaxSound.push_back(maxSound); //accumulate loudest sounds
+    // Store maximum sound in history
+    graphMaxSound.push_back(maxSound);
     
-    float accumMaxSounds;
-    for (int i =0; i<graphMaxSound.size(); i++) {
-        accumMaxSounds = accumMaxSounds+graphMaxSound[i]; //add up all loudest sounds
-    }
+    // Calculate average maximum sound over time
+    avgMaxSoundOverTime = std::accumulate(graphMaxSound.begin(),
+                                        graphMaxSound.end(), 0.0f) /
+                                        graphMaxSound.size();
     
-    avgMaxSoundOverTime = accumMaxSounds/graphMaxSound.size(); //take average over a certain number of frames
-    
-    float meanSum=0;
-    float mean,stdDev,stdDevAccum, variance,deviation;
-    
-    float spectralCentroidAccum, spectralWeightsAccum, spectralWeights;
-    
-    
-    for(int i=0; i<fftSpectrum.size(); i++){ //for the number of columns
-        
-        //NORMALIZE
-        if(normalize){
-            fftSpectrum[i] = ofMap(fftSpectrum[i], 0, avgMaxSoundOverTime, 0, 1, true); //normalize each frame to 0-1
+    // Process spectrum into frequency bands
+    for (int i = 0; i < fftSpectrum.size(); i++) {
+        // Normalize if enabled
+        if (normalize) {
+            fftSpectrum[i] = ofMap(fftSpectrum[i], 0.0f, avgMaxSoundOverTime, 0.0f, 1.0f, true);
         }
         
-        //COMPUTE NOISINESS
-        //compute standard deviation - this works OK, but isn't iron clad - can detect single notes versus multiple notes
-        //REMOVING FOR FULL RUN - NOT BEING USED
-        /*
-        meanSum = meanSum + fftSpectrum[i]; //add up all values
-        
-        mean=meanSum/fftSpectrum.size(); //compute the mean
-        
-        deviation = (fftSpectrum[i]-mean)*(fftSpectrum[i]-mean);
-        
-        stdDevAccum = deviation + stdDevAccum;
-        
-        variance = stdDevAccum/(fftSpectrum.size()-1);
-        
-        noisiness = stdDev = sqrt(variance);
-        
-        //AVERAGE PITCH/SPECTRAL CENTROID
-        //compute spectral centroid/average pitch - this is not quite right yet
-        spectralCentroidAccum += i*fftSpectrum[i];
-        
-        spectralWeightsAccum += fftSpectrum[i];
-        
-        spectralCentroid = spectralCentroidAccum/spectralWeightsAccum; //gives the average band that is the loudest
-        */
-        
-        //EQ BANDS
-        if (i==1 ) {
-            superLowEqAvg = (fftSpectrum[0]); //just compute the lowest bass bin - not an average
+        // Calculate EQ bands
+        if (i == 1) {
+            superLowEqAvg = fftSpectrum[0]; // Just use the lowest bin for super low
         }
         
-        //find bands for each 3rd of the entire thing...this is not musically accurate, just a rough estimate
-        if (i>0 && i<numFFTbins*.333) {
-            lowEqAvg = lowEqAvg+fftSpectrum[i];
-        }
-        if (i>numFFTbins*.33 && i<numFFTbins*.666) {
-            midEqAvg = midEqAvg+fftSpectrum[i];
-        }
-        if (i>numFFTbins*.666 && i<numFFTbins) {
-            highEqAvg = highEqAvg+fftSpectrum[i];
+        // Split spectrum into three bands (low, mid, high)
+        if (i > 0 && i < numFFTbins * 0.333f) {
+            lowEqAvg += fftSpectrum[i];
+        } else if (i >= numFFTbins * 0.333f && i < numFFTbins * 0.666f) {
+            midEqAvg += fftSpectrum[i];
+        } else if (i >= numFFTbins * 0.666f) {
+            highEqAvg += fftSpectrum[i];
         }
     }
     
-    freqDelta = freqDelta/numFFTbins;
+    // Average the bands
+    lowEqAvg /= (numFFTbins * 0.333f);
+    midEqAvg /= (numFFTbins * 0.333f);
+    highEqAvg /= (numFFTbins * 0.333f);
     
-    // superLowEqAvg = (float)superLowEqAvg/2; //only doing it off the lowest ones
-    lowEqAvg = lowEqAvg/(numFFTbins*.333); //take a third of the entire bin collection to decide about low/mid/high
-    midEqAvg = midEqAvg/(numFFTbins*.333);
-    highEqAvg = highEqAvg/(numFFTbins*.333);
-    
-    if(saveHistory){ //only save these if drawing
+    // Save history if enabled
+    if (saveHistory) {
         graphSuperLow.push_back(superLowEqAvg);
         graphLow.push_back(lowEqAvg);
         graphMid.push_back(midEqAvg);
         graphHigh.push_back(highEqAvg);
     }
-    
 }
 
-//---------------------------------------------
-void ProcessFFT::drawHistoryGraph(ofPoint pt, fftRangeType drawType){
+void ofxProcessFFT::drawHistoryGraph(const glm::vec2& position, fftRangeType drawType) {
+    // Enable history saving
+    saveHistory = true;
     
-    saveHistory=true; //only do this if drawing
-    
+    // Draw appropriate graph based on type
     switch (drawType) {
         case SUPERLOW:
-            drawAvgGraph(pt, graphSuperLow, ofColor(0, 100, 255,200));
+            drawAvgGraph(position, graphSuperLow, ofColor(0, 100, 255, 200));
             break;
         case LOW:
-            drawAvgGraph(pt, graphLow, ofColor(0, 100, 255,200));
+            drawAvgGraph(position, graphLow, ofColor(0, 100, 255, 200));
             break;
         case MID:
-            drawAvgGraph(pt, graphMid, ofColor(0, 255, 100,200));
+            drawAvgGraph(position, graphMid, ofColor(0, 255, 100, 200));
             break;
         case HIGH:
-            drawAvgGraph(pt, graphHigh,ofColor(255, 0, 100,200));
+            drawAvgGraph(position, graphHigh, ofColor(255, 0, 100, 200));
             break;
         case MAXSOUND:
-            drawAvgGraphUnScaled(pt, graphMaxSound,ofColor(255, 100, 255,200));
+            drawAvgGraphUnScaled(position, graphMaxSound, ofColor(255, 100, 255, 200));
             break;
         default:
-            drawAvgGraphUnScaled(pt, graphMaxSound,ofColor(255, 100, 255,200));
+            drawAvgGraphUnScaled(position, graphMaxSound, ofColor(255, 100, 255, 200));
             break;
     }
-    
-
-    
 }
 
-//---------------------------------------------
-void ProcessFFT::drawAvgGraph(ofPoint pt, vector<float> values, ofColor _color){
-
+void ofxProcessFFT::drawAvgGraph(const glm::vec2& position, const std::vector<float>& values, const ofColor& color) {
+    if (values.empty()) return;
+    
+    // Only draw if normalizing or if there's data to show
     if (normalize) {
         ofEnableAlphaBlending();
         ofPushMatrix();
         ofFill();
-        ofSetColor(_color);
-        ofTranslate(pt.x, pt.y);
-        ofBeginShape();
-    
-        float avgVal;
-        for (int i = 0; i < (int)ofMap(values.size(), 0 , values.size(), 0,200); i++){ //scale it to be 200px wide
-            if( i == 0 ) ofVertex(i, 200);
-            
-            ofVertex(i,ofMap(values[(int)ofMap(i, 0 , 200, 0,values.size())], 0, 1, 200, 0,true));
-            
-            avgVal = avgVal+values[(int)ofMap(i, 0 , 200, 0,values.size())];
-            if( i == 200 -1 ) ofVertex(i, 200);
-        }
-    
-        avgVal = avgVal/values.size();
+        ofSetColor(color);
+        ofTranslate(position);
         
-        ofEndShape(false);
-        ofSetColor(255);
-        ofDrawLine(0,ofMap(avgVal, 0, 1, 200, 0,true) , 200, ofMap(avgVal, 0, 1, 200, 0,true));
-        ofPopMatrix();
-        ofDisableAlphaBlending();
-    }else{
-        //not normalized
-        ofEnableAlphaBlending();
-        ofPushMatrix();
-        ofFill();
-        ofSetColor(_color);
-        ofTranslate(pt.x, pt.y);
         ofBeginShape();
         
-        float avgVal;
-        for (int i = 0; i < (int)ofMap(values.size(), 0 , values.size(), 0,200); i++){ //scale it to be 200px wide
-            if( i == 0 ) ofVertex(i, 200);
+        // Start at the bottom left
+        ofVertex(0, 200);
+        
+        float avgVal = 0.0f;
+        const int drawWidth = 200;
+        
+        // Draw each point, mapping from the buffer size to 200px width
+        for (int i = 0; i < drawWidth; i++) {
+            // Map buffer index based on position
+            int bufferIndex = ofMap(i, 0, drawWidth, 0, values.size(), true);
             
-            ofVertex(i,ofMap(values[(int)ofMap(i, 0 , 200, 0,values.size())], 0, volumeRange, 200, 0,true));
+            // Map value to height (0-1 -> 200-0)
+            float height = ofMap(values[bufferIndex], 0.0f, 1.0f, 200.0f, 0.0f, true);
             
-            avgVal = avgVal+values[(int)ofMap(i, 0 , 200, 0,values.size())];
-            if( i == 200 -1 ) ofVertex(i, 200);
+            // Draw vertex
+            ofVertex(i, height);
+            
+            // Accumulate for average
+            avgVal += values[bufferIndex];
+            
+            // End at bottom right
+            if (i == drawWidth - 1) ofVertex(i, 200);
         }
         
-        avgVal = avgVal/values.size();
-        
         ofEndShape(false);
+        
+        // Draw average line
+        avgVal /= values.size();
         ofSetColor(255);
-        ofDrawLine(0,ofMap(avgVal, 0, volumeRange, 200, 0,true) , 200, ofMap(avgVal, 0, volumeRange, 200, 0,true));
+        ofDrawLine(0, ofMap(avgVal, 0.0f, 1.0f, 200.0f, 0.0f, true),
+                   drawWidth, ofMap(avgVal, 0.0f, 1.0f, 200.0f, 0.0f, true));
+        
         ofPopMatrix();
         ofDisableAlphaBlending();
+    } else {
+        // Draw unnormalized graph
+        drawAvgGraphUnScaled(position, values, color);
+    }
+}
+
+void ofxProcessFFT::drawAvgGraphUnScaled(const glm::vec2& position, const std::vector<float>& values, const ofColor& color) {
+    if (values.empty()) return;
+    
+    ofEnableAlphaBlending();
+    ofPushMatrix();
+    ofFill();
+    ofSetColor(color);
+    ofTranslate(position);
+    
+    ofBeginShape();
+    
+    // Start at the bottom left
+    ofVertex(0, 200);
+    
+    float avgMaximum = 0.0f;
+    float prevAvgMaximum = 0.0f;
+    const int drawWidth = 200;
+    
+    // Draw each point, mapping from the buffer size to 200px width
+    for (int i = 0; i < drawWidth; i++) {
+        // Map buffer index based on position
+        int bufferIndex = ofMap(i, 0, drawWidth, 0, values.size(), true);
+        
+        // Map value to height (0-volumeRange -> 200-0)
+        float height = ofMap(values[bufferIndex], 0.0f, volumeRange, 200.0f, 0.0f, true);
+        
+        // Draw vertex
+        ofVertex(i, height);
+        
+        // Accumulate for average
+        avgMaximum += values[bufferIndex];
+        
+        // Accumulate for first half average
+        if (i < drawWidth / 2) {
+            prevAvgMaximum += values[bufferIndex];
+        }
+        
+        // End at bottom right
+        if (i == drawWidth - 1) ofVertex(i, 200);
     }
     
-}
-//---------------------------------------------
-void ProcessFFT::drawAvgGraphUnScaled(ofPoint pt, vector<float> values, ofColor _color){
-        ofEnableAlphaBlending();
-        ofPushMatrix();
-        ofFill();
-        ofSetColor(_color);
-        ofTranslate(pt.x, pt.y);
-        ofBeginShape(); //then do the average again
+    ofEndShape(false);
     
-    float prevAvgMaximum = 0;
-        float avgMaximum =0;
+    // Calculate averages
+    avgMaximum /= values.size();
+    prevAvgMaximum /= (values.size() / 2);
     
-        for (int i = 0; i < (int)ofMap(values.size(), 0 , values.size(), 0,200); i++){
-            if( i == 0 ) ofVertex(i, 200);
-            
-            ofVertex(i,ofMap(values[(int)ofMap(i, 0 , 200, 0,values.size())], 0, volumeRange, 200, 0,true));
-            
-            avgMaximum = avgMaximum+values[(int)ofMap(i, 0 , 200, 0,values.size())];
-            
-            if (i<((int)ofMap(i, 0 , 200, 0,values.size()))/2) {
-                prevAvgMaximum = prevAvgMaximum + values[(int)ofMap(i, 0 , 200, 0,values.size())]; //take half of the bin and get the average and compare that to the whole thing
-            }
-            
-            if( i == 200 -1 ) ofVertex(i, 200);
-        }
-        
-        ofEndShape(false);
+    // Calculate delta
+    delta = avgMaximum - prevAvgMaximum;
     
-    avgMaximum = avgMaximum/values.size();
-    prevAvgMaximum = prevAvgMaximum/(values.size()/2);
-    
-   // cout<< "Delta: " << avgMaximum - prevAvgMaximum <<endl;
-    
-    //make trigger a percentage of the current max volume
-    
-    
-    
+    // Draw average line
     ofSetColor(255);
-    ofDrawLine(0,ofMap(avgMaximum, 0, volumeRange, 200, 0,true) , 200, ofMap(avgMaximum, 0,volumeRange, 200, 0,true));
-
+    ofDrawLine(0, ofMap(avgMaximum, 0.0f, volumeRange, 200.0f, 0.0f, true),
+               drawWidth, ofMap(avgMaximum, 0.0f, volumeRange, 200.0f, 0.0f, true));
     
-        ofPopMatrix();
-        ofDisableAlphaBlending();
+    ofPopMatrix();
+    ofDisableAlphaBlending();
 }
 
-//---------------------------------------------
-void ProcessFFT::drawBars(){
-    if(normalize){
+void ofxProcessFFT::drawBars() {
     ofPushStyle();
     ofSetRectMode(OF_RECTMODE_CORNER);
     ofSetLineWidth(2);
-    for(int i=0; i<fftSpectrum.size(); i++){ //for the number of columns
-        if (i==loudestBand) {
-            ofSetColor(255,0,0);
+    
+    const float barWidth = ofGetWidth() / (float)numFFTbins;
+    const float maxHeight = ofGetHeight() - 50;
+    
+    for (int i = 0; i < fftSpectrum.size(); i++) {
+        // Highlight the loudest band
+        if (i == loudestBand) {
+            ofSetColor(255, 0, 0);
+        } else {
+            ofSetColor(100, 100, 200);
         }
-        else{
-            ofSetColor(100,100,200);
-        }
+        
         ofNoFill();
-        ofDrawRectangle(ofGetWidth()*((float)i/numFFTbins), ofGetHeight()-20, ofGetWidth()/numFFTbins, -ofMap(fftSpectrum[i], 0, 1, 0, ofGetHeight() -50));
-    }
-    ofPopStyle();
-    }else{
-        //not normalized
-        ofPushStyle();
-        ofSetRectMode(OF_RECTMODE_CORNER);
-        ofSetLineWidth(2);
-        for(int i=0; i<fftSpectrum.size(); i++){ //for the number of columns
-            if (i==loudestBand) {
-                ofSetColor(255,0,0);
-            }
-            else{
-                ofSetColor(100,100,200);
-            }
-            ofNoFill();
-            ofDrawRectangle(ofGetWidth()*((float)i/numFFTbins), ofGetHeight()-20, ofGetWidth()/numFFTbins, -ofMap(fftSpectrum[i], 0, volumeRange, 0, ofGetHeight() -50));
+        
+        // Calculate bar height based on normalization setting
+        float barHeight;
+        if (normalize) {
+            barHeight = ofMap(fftSpectrum[i], 0.0f, 1.0f, 0.0f, maxHeight);
+        } else {
+            barHeight = ofMap(fftSpectrum[i], 0.0f, volumeRange, 0.0f, maxHeight);
         }
-        ofPopStyle();
+        
+        // Draw the bar
+        ofDrawRectangle(i * barWidth, ofGetHeight() - 20, barWidth, -barHeight);
     }
+    
+    ofPopStyle();
 }
 
-//---------------------------------------------
-void ProcessFFT::drawDebug(){
+void ofxProcessFFT::drawDebug() {
     ofPushMatrix();
-    ofDrawBitmapStringHighlight("Loudest Band: " + ofToString(loudestBand), 250,20);
-    ofDrawBitmapStringHighlight("Curr. Max Sound Val: "+ ofToString(maxSound), 250,40);
-    ofDrawBitmapStringHighlight("Super Low Avg: " + ofToString(superLowEqAvg), 250,60);
-    ofDrawBitmapStringHighlight("Low Avg: " + ofToString(lowEqAvg), 250,80);
-    ofDrawBitmapStringHighlight("Mid Avg: " + ofToString(midEqAvg), 250,100);
-    ofDrawBitmapStringHighlight("High Avg: " + ofToString(highEqAvg), 250,120);
-    ofDrawBitmapStringHighlight("Noisiness: " + ofToString(noisiness), 250,140);
-    ofDrawBitmapStringHighlight("SpectralCentroid: " + ofToString(spectralCentroid), 250,160);
-    ofDrawBitmapStringHighlight("Avg Max Sound: " + ofToString(avgMaxSoundOverTime), 250,180);
-    ofDrawBitmapStringHighlight("Delta: " + ofToString(getDelta()), 250,200);
-    ofDrawBitmapStringHighlight("Delta Shift Detected: " + ofToString(abs(getDelta())>(avgMaxSoundOverTime*.20)), 250,220);
     
+    const int startX = 250;
+    const int lineHeight = 20;
+    int y = 20;
     
-    ofDrawBitmapStringHighlight("Freq Range up to: " +ofToString(ofMap(FFTpercentage, 0, 0.23, 0, 5000)) + "hz", 450,60);
-    float freqPerBin = ofMap(FFTpercentage, 0, 0.23, 0, 5000)/numFFTbins;
-    ofDrawBitmapStringHighlight("Freq range per bin: " +ofToString(freqPerBin) + "hz", 450,80);
-    ofDrawBitmapStringHighlight("Approx Number of octaves from C0: " +ofToString(ofMap(ofMap(FFTpercentage, 0, 0.23, 0, 5000),0,5000,0,8)), 450,100); //wrong wrong wrong - octave frequency doubles as it goes up - octave is from n to 2n hz, so do more math for this
-    ofDrawBitmapStringHighlight("Approx Freq of Loudest Band: " +ofToString(freqPerBin*loudestBand)+"hz", 450,120);
+    // Display various audio analysis values
+    ofDrawBitmapStringHighlight("Loudest Band: " + ofToString(loudestBand), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Curr. Max Sound Val: " + ofToString(maxSound), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Super Low Avg: " + ofToString(superLowEqAvg), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Low Avg: " + ofToString(lowEqAvg), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Mid Avg: " + ofToString(midEqAvg), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("High Avg: " + ofToString(highEqAvg), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Noisiness: " + ofToString(noisiness), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("SpectralCentroid: " + ofToString(spectralCentroid), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Avg Max Sound: " + ofToString(avgMaxSoundOverTime), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Delta: " + ofToString(getDelta()), startX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Delta Shift Detected: " +
+                              ofToString(abs(getDelta()) > (avgMaxSoundOverTime * 0.20f)),
+                              startX, y);
+    y += lineHeight;
+    
+    // Display frequency information
+    const int freqInfoX = 450;
+    y = 60;
+    
+    ofDrawBitmapStringHighlight("Freq Range up to: " +
+                              ofToString(ofMap(FFTpercentage, 0.0f, 0.23f, 0.0f, 5000.0f)) + "Hz",
+                              freqInfoX, y);
+    y += lineHeight;
+    
+    float freqPerBin = ofMap(FFTpercentage, 0.0f, 0.23f, 0.0f, 5000.0f) / numFFTbins;
+    ofDrawBitmapStringHighlight("Freq range per bin: " + ofToString(freqPerBin) + "Hz",
+                              freqInfoX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Approx Number of octaves from C0: " +
+                              ofToString(ofMap(ofMap(FFTpercentage, 0.0f, 0.23f, 0.0f, 5000.0f),
+                                             0.0f, 5000.0f, 0.0f, 8.0f)),
+                              freqInfoX, y);
+    y += lineHeight;
+    
+    ofDrawBitmapStringHighlight("Approx Freq of Loudest Band: " +
+                              ofToString(freqPerBin * loudestBand) + "Hz",
+                              freqInfoX, y);
+    
     ofPopMatrix();
 }
 
-
-//GETTERS
-
-float ProcessFFT::getIntensityAtFrequency(float _freq){
-    //Todo: figure out this calculation from the raw bins
-    //8193 bins
+// Getter methods
+float ofxProcessFFT::getIntensityAtFrequency(float frequency) const {
+    // Calculate which bin corresponds to this frequency
+    const auto& bins = fft.getBins();
+    int whichBin = ofMap(frequency, 0.0f, 22100.0f, 0, bins.size());
     
-   // fft.getBins()[fft.getBins().size()];
+    // Ensure the bin is within valid range
+    whichBin = ofClamp(whichBin, 0, bins.size() - 1);
     
-    int whichBin;
-    whichBin = ofMap(_freq, 0, 22100, 0, fft.getBins().size()); //An approximation...
-    
-    float normalizedFreq;
-    normalizedFreq = ofMap(fft.getBins()[whichBin]*scaleFactor, 0, avgMaxSoundOverTime, 0, 1,true); //the scalefactor is just a scaling factor to have easier numbers to look at
+    // Normalize the frequency intensity
+    float normalizedFreq = ofMap(bins[whichBin] * scaleFactor,
+                               0.0f, avgMaxSoundOverTime,
+                               0.0f, 1.0f, true);
     
     return normalizedFreq;
-    
 }
 
-float ProcessFFT::getDelta(){
-    float prevAvgMaximum = 0;
-    float avgMaximum =0;
+float ofxProcessFFT::getDelta() const {
+    if (graphMaxSound.empty()) return 0.0f;
     
-    for (int i = 0; i < graphMaxSound.size(); i++){
-              
-        avgMaximum = avgMaximum+graphMaxSound[i];
+    float prevAvgMaximum = 0.0f;
+    float avgMaximum = 0.0f;
+    
+    for (size_t i = 0; i < graphMaxSound.size(); i++) {
+        avgMaximum += graphMaxSound[i];
         
-        if (i<graphMaxSound.size()/2) {
-            prevAvgMaximum = prevAvgMaximum + graphMaxSound[i]; //take half of the bin and get the average and compare that to the whole thing
+        if (i < graphMaxSound.size() / 2) {
+            prevAvgMaximum += graphMaxSound[i];
         }
-        
     }
     
-    avgMaximum = avgMaximum/graphMaxSound.size();
-    prevAvgMaximum = prevAvgMaximum/(graphMaxSound.size()/2);
+    avgMaximum /= graphMaxSound.size();
+    prevAvgMaximum /= (graphMaxSound.size() / 2);
     
-    delta = avgMaximum - prevAvgMaximum;
-    return delta; //if the delta is greater than a percentage of the maximum volume, then trigger an event (delta scales to maximum volume)
+    return avgMaximum - prevAvgMaximum;
 }
 
-
-float ProcessFFT::getUnScaledLoudestValue(){
-    //This returns the unnormalized value of the current loudest sound - useful for detecting whether the volume input is low or really high
+float ofxProcessFFT::getUnScaledLoudestValue() const {
     return maxSound;
 }
 
-float ProcessFFT::getSmoothedUnScaledLoudestValue(){
+float ofxProcessFFT::getSmoothedUnScaledLoudestValue() const {
     return avgMaxSoundOverTime;
 }
 
-vector<float> ProcessFFT::getSpectrum(){
+const std::vector<float>& ofxProcessFFT::getSpectrum() const {
     return fftSpectrum;
 }
 
-float ProcessFFT::getNoisiness(){
+float ofxProcessFFT::getNoisiness() const {
     return noisiness;
 }
 
-bool ProcessFFT::getNormalized(){
+bool ofxProcessFFT::getNormalized() const {
     return normalize;
 }
 
-float ProcessFFT::getLoudBand(){
-    return loudestBand; //Todo: this needs to be an average
+float ofxProcessFFT::getLoudBand() const {
+    return loudestBand;
 }
 
-float ProcessFFT::getSuperLowVal(){
-    return superLowEqAvg; //this is NOT smoothed, but outputs
+float ofxProcessFFT::getSuperLowVal() const {
+    return superLowEqAvg;
 }
 
-float ProcessFFT::getLowVal(){
+float ofxProcessFFT::getLowVal() const {
     return lowEqAvg;
 }
 
-float ProcessFFT::getMidVal(){
+float ofxProcessFFT::getMidVal() const {
     return midEqAvg;
 }
 
-float ProcessFFT::getHighVal(){
+float ofxProcessFFT::getHighVal() const {
     return highEqAvg;
 }
 
-float ProcessFFT::getFFTpercentage(){
+float ofxProcessFFT::getSpectralCentroid() const {
+    return spectralCentroid;
+}
+
+float ofxProcessFFT::getFFTpercentage() const {
     return FFTpercentage;
 }
 
-float ProcessFFT::getExponent(){
-    return FFTpercentage;
+float ofxProcessFFT::getExponent() const {
+    return exponent;
 }
 
-int ProcessFFT::getNumFFTbins(){
+int ofxProcessFFT::getNumFFTbins() const {
     return numFFTbins;
 }
 
-//SETTERS
-void ProcessFFT::setFFTpercentage(float _FFTpercentage){
-    this->FFTpercentage=_FFTpercentage;
+// Setter methods
+void ofxProcessFFT::setFFTpercentage(float fftPercentage) {
+    this->FFTpercentage = fftPercentage;
 }
 
-void ProcessFFT::setExponent(float _exponent){
-    this->exponent=_exponent;
+void ofxProcessFFT::setExponent(float exponent) {
+    this->exponent = exponent;
 }
 
-void ProcessFFT::setNumFFTBins(int _numFFTBins){
-    this->numFFTbins = _numFFTBins;
+void ofxProcessFFT::setNumFFTBins(int numFFTBins) {
+    this->numFFTbins = numFFTBins;
 }
 
-void ProcessFFT::setHistorySize(int _framesOfHistory){
-    this->graphMaxSize = _framesOfHistory;
+void ofxProcessFFT::setHistorySize(int framesOfHistory) {
+    this->graphMaxSize = framesOfHistory;
+    
+    // Resize history buffers
+    if (graphLow.size() > framesOfHistory) {
+        graphLow.resize(framesOfHistory);
+        graphMid.resize(framesOfHistory);
+        graphHigh.resize(framesOfHistory);
+        graphSuperLow.resize(framesOfHistory);
+        graphMaxSound.resize(framesOfHistory);
+    }
 }
 
-void ProcessFFT::setNormalize(bool _normalize){
-    this->normalize = _normalize;
+void ofxProcessFFT::setNormalize(bool normalize) {
+    this->normalize = normalize;
 }
 
-void ProcessFFT::setVolumeRange(int _volumeRange){
-    this->volumeRange = _volumeRange;
+void ofxProcessFFT::setVolumeRange(int volumeRange) {
+    this->volumeRange = volumeRange;
 }
