@@ -181,6 +181,12 @@ public:
      */
     const std::vector<float>& getAmplitudeVector() const;
     
+    // For backward compatibility
+    std::vector<float> getAmplitudeVector() {
+        float* amplitudePtr = getAmplitude();
+        return std::vector<float>(amplitudePtr, amplitudePtr + getBinSize());
+    }
+    
     /**
      * @brief Get the phase component of the frequency spectrum
      * @return float* Pointer to the phase component data
